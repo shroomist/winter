@@ -16,25 +16,27 @@ type Zombie struct {
 }
 
 type State struct {
-	zombieAt   *Zombie
+	//zombieAt   *Zombie
 	terminator chan bool
-	zombieChan chan *ShotOrZombie
-	shotChan   chan *ShotOrZombie
+	zombieChan chan *Zombie
 }
 
 func (state *State) close() {
 	fmt.Println("sending closing game signals")
-	state.terminator <- true
+
+	fmt.Println("1")
 	close(state.zombieChan) // perhaps these get closed down the line
-	close(state.shotChan)
+	fmt.Println("2")
 	close(state.terminator)
+	fmt.Println("all zombie channels closed")
 }
 
 type Client struct {
-	sid  string
-	hub  *Hub
-	conn *websocket.Conn
-	send chan []byte //sending zombies via this channel
+	sid      string
+	hub      *Hub
+	conn     *websocket.Conn
+	shotChan chan *ShotOrZombie // rename
+
 }
 
 type ShotOrZombie struct {
@@ -46,7 +48,6 @@ type Hub struct {
 	games      map[*Client]*State
 	register   chan *Client
 	unregister chan *Client
-	shots      chan *ShotOrZombie
 }
 
 func newHub() *Hub {
@@ -54,33 +55,30 @@ func newHub() *Hub {
 		games:      make(map[*Client]*State),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
-		shots:      make(chan *ShotOrZombie),
 	}
 }
+
+var gameMapMutex = &sync.Mutex{}
 
 func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
+			gameMapMutex.Lock()
 			h.games[client] = &State{ // RACE prev w
-				zombieAt:   &Zombie{pos: &Vertex{1, 10}}, //#RACE 1 previous write #RACE 2 3 prev write
 				terminator: make(chan bool),
-				zombieChan: make(chan *ShotOrZombie),
-				shotChan:   make(chan *ShotOrZombie), //#RACE 2 4
+				zombieChan: make(chan *Zombie),
 			}
+			gameMapMutex.Unlock()
+			go client.writePump() // #RACE
+			go client.readPump()
+
 		case client := <-h.unregister:
 			fmt.Println("client unregister ", client)
+			gameMapMutex.Lock()
 			h.games[client].close()
-			delete(h.games, client)
-		case shot := <-h.shots:
-			select {
-			//case shot := <-h.games[shot.client].shotChan:
-			//fmt.Println("got shot at ", shot)
-			default:
-				fmt.Println("Fallthru to closing the game", shot)
-				//h.games[shot.client].close()
-
-			}
+			delete(h.games, client) // RACE
+			gameMapMutex.Unlock()
 		}
 
 	}
@@ -121,7 +119,7 @@ func (c *Client) readPump() {
 			if erry != nil {
 				fmt.Errorf("failed to convert coordinates")
 			}
-			c.hub.games[c].shotChan <- &ShotOrZombie{
+			c.shotChan <- &ShotOrZombie{ // RACE? shall we lock here?
 				pos:    &Vertex{X: x, Y: y},
 				client: c,
 			}
@@ -134,15 +132,19 @@ func (c *Client) readPump() {
 func (c *Client) writePump() {
 	// add lost connection handle
 	for {
-		select {
-		case zombieMove, ok := <-c.hub.games[c].zombieChan: // #RACE, game wasnt created
-			w, err := c.conn.NextWriter(websocket.TextMessage)
-			if err != nil || !ok {
-				return // more err handle
-			}
-			fmt.Println(zombieMove)
-			w.Write([]byte(strconv.Itoa(zombieMove.pos.X) + " " + strconv.Itoa(zombieMove.pos.Y)))
+		//select {
+		//case zombieMove, ok := <-c.hub.games[c].zombieChan: // #RACE, game wasnt created
+		gameMapMutex.Lock()
+		zombieMove, ok := <-c.hub.games[c].zombieChan // #RACE, game wasnt created
+		gameMapMutex.Unlock()
+		w, err := c.conn.NextWriter(websocket.TextMessage)
+		if err != nil || !ok {
+			return // more err handle
 		}
+		zombieMove.Lock()
+		w.Write([]byte(strconv.Itoa(zombieMove.pos.X) + " " + strconv.Itoa(zombieMove.pos.Y)))
+		zombieMove.Unlock()
+		//}
 	}
 
 }
@@ -154,11 +156,9 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) { //#RACE
 		fmt.Println(err)
 		return
 	}
-	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}
+	client := &Client{hub: hub, conn: conn, shotChan: make(chan *ShotOrZombie)}
 	client.hub.register <- client
 
 	// Allow collection of memory referenced by the caller by doing all work in
 	// new goroutines.
-	go client.writePump() // #RACE
-	go client.readPump()
 }

@@ -50,7 +50,7 @@ func main() {
 	for {
 		select {
 		case <-ticker.C:
-			err := c.WriteMessage(websocket.TextMessage, []byte("10 10"))
+			err := c.WriteMessage(websocket.TextMessage, []byte("2 10"))
 			if err != nil {
 				log.Println("write:", err)
 				return

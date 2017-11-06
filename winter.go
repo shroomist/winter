@@ -35,10 +35,10 @@ var winterHttpInst util.WinterHttpServer
 
 func main() {
 	hub := newHub()
-	go hub.run() //#RACE
+	go hub.run()
 
 	http.HandleFunc("/websocket", func(w http.ResponseWriter, r *http.Request) {
-		serveWs(hub, w, r) // #RACE
+		serveWs(hub, w, r)
 	})
 	err := http.ListenAndServe(*addr, nil)
 	if err != nil {
@@ -49,44 +49,48 @@ func main() {
 
 func startZombie(state *State, client *Client) {
 	ticker := time.NewTicker(time.Second * 2)
-	defer ticker.Stop()
-
 	zombieAt := &Zombie{pos: &Vertex{0, 10}}
+	defer func() {
+		ticker.Stop()
+		close(state.zombieChan)
+		fmt.Println("zombie routine end, clock stopped")
+	}()
+	gameInfo := "started"
 
 ZombieLifecycle:
 	for {
 		select {
-		case shot := <-client.shotChan: //#RACE 2!
+		case shot := <-client.shotChan:
 			zombieAt.Lock()
-			var isAHit bool = (zombieAt.pos.X == shot.pos.X && zombieAt.pos.Y == shot.pos.Y)
+			var isAHit bool = (zombieAt.pos.X == shot.X && zombieAt.pos.Y == shot.Y)
 			zombieAt.Unlock()
 			if isAHit {
-				state.close()
-				fmt.Println("zombie got hit")
+				gameInfo = "zombie got hit. Client wins"
 				break ZombieLifecycle
 			}
 		case <-ticker.C:
 			zombieAt.Lock()
 			pos := zombieAt.pos
-			if pos.X >= GAME_WIDTH { //#RACE 3 read
+			if pos.X >= GAME_WIDTH {
 				zombieAt.Unlock()
-				state.close()
-				fmt.Println("Position overlap zombie wins")
+				gameInfo = "Zombie reaches the end. Client loose"
 				break ZombieLifecycle
 
 			}
 			pos.X += 1
-			pos.Y = getRandomFromCenter(pos.Y) //#RACE 2 read
+			pos.Y = getRandomFromCenter(pos.Y)
 			zombieAt.pos = pos
-			state.zombieChan <- zombieAt //#RACE 2 routine created
+			state.zombieChan <- zombieAt
 			zombieAt.Unlock()
-		case <-state.terminator: // #RACE 4
-			fmt.Println("exiting zombie routine")
+		case <-client.terminator:
+			gameInfo = "Client is lost."
 			break ZombieLifecycle
 		}
 	}
-	fmt.Println("zombie routine end")
+	state.gameInfo <- gameInfo
+	//state.close(gameInfo)
 }
+
 func getRandomFromCenter(c int) int {
 	switch {
 	case c == 0:

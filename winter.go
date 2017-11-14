@@ -14,7 +14,7 @@ import (
 const (
 	GAME_WIDTH            = 3
 	GAME_HEIGHT           = 20
-	ZOMBIE_CLOCK          = 3
+	ZOMBIE_CLOCK          = 3 // seconds
 	WEBSOCKET_BUFFER_SIZE = 1024
 )
 
@@ -42,7 +42,7 @@ func main() {
 }
 
 // serveWs handles websocket requests from the peer.
-func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) { //#RACE
+func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		fmt.Println(err)
@@ -50,9 +50,6 @@ func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) { //#RACE
 	}
 	client := &Client{hub: hub, conn: conn, shotChan: make(chan *Vertex)}
 	client.hub.register <- client
-
-	// Allow collection of memory referenced by the caller by doing all work in
-	// new goroutines.
 }
 
 func startZombie(state *State, client *Client) {
@@ -95,7 +92,7 @@ ZombieLifecycle:
 			pos.X += 1
 			pos.Y = getRandomFromCenter(pos.Y)
 			zombieAt.pos = pos
-			select { // this select is a non blocking send on a channel trick
+			select { // this select is a non blocking send on a channel
 			case state.zombieChan <- zombieAt: // it sent
 			default:
 				fmt.Println("sending zombie pos is being blocked, client lost or write pump is slow")

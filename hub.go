@@ -3,11 +3,16 @@ package main
 import (
 	"fmt"
 	"github.com/gorilla/websocket"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 )
+
+var gameMapMutex = &sync.Mutex{}
+
+type Vertex struct {
+	X, Y int
+}
 
 type Zombie struct {
 	sync.Mutex
@@ -17,19 +22,19 @@ type Zombie struct {
 type State struct {
 	zombieChan chan *Zombie
 	gameInfo   chan string
+	score      *Score
 }
 
-func (state *State) close(gi string) {
-	state.gameInfo <- gi
-	//close(state.zombieChan)
+type Score struct {
+	sync.Mutex
+	client int
+	server int
 }
 
 type Client struct {
-	sid        string
-	hub        *Hub
-	conn       *websocket.Conn
-	shotChan   chan *Vertex
-	terminator chan bool
+	hub      *Hub
+	conn     *websocket.Conn
+	shotChan chan *Vertex
 }
 
 type Hub struct {
@@ -46,16 +51,15 @@ func newHub() *Hub {
 	}
 }
 
-var gameMapMutex = &sync.Mutex{}
-
 func (h *Hub) run() {
 	for {
 		select {
 		case client := <-h.register:
 			gameMapMutex.Lock()
 			h.games[client] = &State{
-				zombieChan: make(chan *Zombie),
+				zombieChan: make(chan *Zombie, 1024),
 				gameInfo:   make(chan string),
+				score:      &Score{client: 0, server: 0},
 			}
 			gameMapMutex.Unlock()
 			go client.writePump() // route zombies to client
@@ -71,16 +75,24 @@ func (h *Hub) run() {
 	}
 }
 
-var upgrader = websocket.Upgrader{ // websocket defaults
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+func handleClientMessage(c *Client, message []byte) {
+	if string(message) == "start" {
+		fmt.Println("starting game for ", c)
+		gameMapMutex.Lock()
+		go startZombie(c.hub.games[c], c)
+		gameMapMutex.Unlock()
+	} else {
+		shot := strToVertex(message)
+		c.shotChan <- shot
+
+	}
+	fmt.Println("got a message: " + string(message))
 }
 
 // run readPump per connection
 func (c *Client) readPump() {
 	defer func() {
 		fmt.Println("closing connection and sending unregister Read Pump")
-		c.terminator <- true
 		c.hub.unregister <- c
 		c.conn.Close()
 	}()
@@ -95,34 +107,9 @@ ListenForMessages:
 			}
 			break ListenForMessages
 		}
-		if string(message) == "start" {
-			startGame(c)
-		} else {
-			x, y := strToXY(message)
-			c.shotChan <- &Vertex{X: x, Y: y}
+		handleClientMessage(c, message)
 
-		}
-		fmt.Println("got a message: " + string(message))
 	}
-
-	fmt.Println("end of read pump")
-}
-
-func strToXY(s []byte) (x int, y int) {
-	strPos := strings.Split(string(s), " ")
-	x, err := strconv.Atoi(strPos[0])
-	if err != nil {
-		fmt.Errorf("failed to convert coordinates")
-	}
-	y, erry := strconv.Atoi(strPos[1])
-	if erry != nil {
-		fmt.Errorf("failed to convert coordinates")
-	}
-	return
-}
-func XYToStr(x int, y int) (s string) {
-	s = string(strconv.Itoa(x) + " " + strconv.Itoa(y))
-	return
 }
 
 func (c *Client) writePump() {
@@ -133,7 +120,6 @@ func (c *Client) writePump() {
 			fmt.Println("write close(closed by other end):", err)
 			return
 		}
-		//c.terminator <- true
 		c.hub.unregister <- c
 		c.conn.Close()
 	}()
@@ -148,8 +134,6 @@ WriteLoop:
 		case zombieMove, ok := <-game.zombieChan:
 			if !ok {
 				fmt.Println("zombie chan closed, stop listening")
-				game.zombieChan = nil
-				break // stay in loop and keep writing from game.info chan
 			} else {
 				w, err := c.conn.NextWriter(websocket.TextMessage)
 				if err != nil {
@@ -157,7 +141,7 @@ WriteLoop:
 					return // stay in loop and keep writing from game.info chan
 				}
 				zombieMove.Lock()
-				msg := XYToStr(zombieMove.pos.X, zombieMove.pos.Y)
+				msg := XYToStr(zombieMove.pos)
 				zombieMove.Unlock()
 				w.Write([]byte(msg))
 				if err := w.Close(); err != nil { // not sure if I should close writer each time here
@@ -182,20 +166,22 @@ WriteLoop:
 			}
 		}
 	}
-	fmt.Println("end of write pump")
-
 }
 
-// serveWs handles websocket requests from the peer.
-func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) { //#RACE
-	conn, err := upgrader.Upgrade(w, r, nil)
+// conversion helpers
+func strToVertex(s []byte) *Vertex {
+	strPos := strings.Split(string(s), " ")
+	x, err := strconv.Atoi(strPos[0])
 	if err != nil {
-		fmt.Println(err)
-		return
+		fmt.Errorf("failed to convert coordinates")
 	}
-	client := &Client{hub: hub, conn: conn, shotChan: make(chan *Vertex), terminator: make(chan bool)}
-	client.hub.register <- client
-
-	// Allow collection of memory referenced by the caller by doing all work in
-	// new goroutines.
+	y, erry := strconv.Atoi(strPos[1])
+	if erry != nil {
+		fmt.Errorf("failed to convert coordinates")
+	}
+	return &Vertex{X: x, Y: y}
+}
+func XYToStr(pos *Vertex) (s string) {
+	s = string(strconv.Itoa(pos.X) + " " + strconv.Itoa(pos.Y))
+	return
 }

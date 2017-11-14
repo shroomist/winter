@@ -2,36 +2,28 @@ package main
 
 import (
 	"flag"
-	"net/http"
-	//"./common"
-	"./util"
 	"fmt"
-	//"io/ioutil"
+	"github.com/gorilla/websocket"
 	"math/rand"
-	//"os"
-	"sync"
+	"net/http"
+	"strconv"
+	"strings"
 	"time"
 )
 
-var mutex = &sync.Mutex{}
-
-//var winterHttpServer = util.WinterHttpServer
-type Vertex struct {
-	X, Y int
-}
+const (
+	GAME_WIDTH            = 3
+	GAME_HEIGHT           = 20
+	ZOMBIE_CLOCK          = 3
+	WEBSOCKET_BUFFER_SIZE = 1024
+)
 
 var addr = flag.String("addr", ":3000", "http service address")
 
-const GAME_WIDTH int = 3
-
-const GAME_HEIGHT int = 20
-
-func init() {
-	rand.Seed(time.Now().UnixNano()) //#1
-
+var upgrader = websocket.Upgrader{ // websocket defaults
+	ReadBufferSize:  WEBSOCKET_BUFFER_SIZE,
+	WriteBufferSize: WEBSOCKET_BUFFER_SIZE,
 }
-
-var winterHttpInst util.WinterHttpServer
 
 func main() {
 	hub := newHub()
@@ -40,22 +32,38 @@ func main() {
 	http.HandleFunc("/websocket", func(w http.ResponseWriter, r *http.Request) {
 		serveWs(hub, w, r)
 	})
+
+	fmt.Println("Listening for client connections")
 	err := http.ListenAndServe(*addr, nil)
 	if err != nil {
-		fmt.Println("ListenAndServe: ", err)
+		fmt.Println("ListenAndServe err: ", err)
 	}
 
 }
 
+// serveWs handles websocket requests from the peer.
+func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) { //#RACE
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	client := &Client{hub: hub, conn: conn, shotChan: make(chan *Vertex)}
+	client.hub.register <- client
+
+	// Allow collection of memory referenced by the caller by doing all work in
+	// new goroutines.
+}
+
 func startZombie(state *State, client *Client) {
-	ticker := time.NewTicker(time.Second * 2)
-	zombieAt := &Zombie{pos: &Vertex{0, 10}}
+	ticker := time.NewTicker(time.Second * ZOMBIE_CLOCK)
+	zombieAt := &Zombie{pos: &Vertex{0, GAME_HEIGHT / 2}}
+	gameInfo := "started"
 	defer func() {
 		ticker.Stop()
-		close(state.zombieChan)
-		fmt.Println("zombie routine end, clock stopped")
+		fmt.Println("zombie routine end, clock stopped. ", gameInfo)
+		state.gameInfo <- gameInfo
 	}()
-	gameInfo := "started"
 
 ZombieLifecycle:
 	for {
@@ -65,7 +73,10 @@ ZombieLifecycle:
 			var isAHit bool = (zombieAt.pos.X == shot.X && zombieAt.pos.Y == shot.Y)
 			zombieAt.Unlock()
 			if isAHit {
-				gameInfo = "zombie got hit. Client wins"
+				state.score.Lock()
+				state.score.client++
+				gameInfo = strings.Join([]string{"zombie got hit ", strconv.Itoa(state.score.client), ":", strconv.Itoa(state.score.server)}, "")
+				state.score.Unlock()
 				break ZombieLifecycle
 			}
 		case <-ticker.C:
@@ -73,22 +84,27 @@ ZombieLifecycle:
 			pos := zombieAt.pos
 			if pos.X >= GAME_WIDTH {
 				zombieAt.Unlock()
-				gameInfo = "Zombie reaches the end. Client loose"
+
+				state.score.Lock()
+				state.score.server++
+				gameInfo = strings.Join([]string{"client dead ", strconv.Itoa(state.score.client), ":", strconv.Itoa(state.score.server)}, "")
+				state.score.Unlock()
 				break ZombieLifecycle
 
 			}
 			pos.X += 1
 			pos.Y = getRandomFromCenter(pos.Y)
 			zombieAt.pos = pos
-			state.zombieChan <- zombieAt
+			select { // this select is a non blocking send on a channel trick
+			case state.zombieChan <- zombieAt: // it sent
+			default:
+				fmt.Println("sending zombie pos is being blocked, client lost or write pump is slow")
+				break ZombieLifecycle
+			}
 			zombieAt.Unlock()
-		case <-client.terminator:
-			gameInfo = "Client is lost."
-			break ZombieLifecycle
+
 		}
 	}
-	state.gameInfo <- gameInfo
-	//state.close(gameInfo)
 }
 
 func getRandomFromCenter(c int) int {
@@ -101,9 +117,4 @@ func getRandomFromCenter(c int) int {
 		return c + 1 - rand.Intn(3)
 
 	}
-}
-
-func startGame(client *Client) {
-	fmt.Println("starting game for ", client)
-	go startZombie(client.hub.games[client], client) //#RACE 1 3 created
 }

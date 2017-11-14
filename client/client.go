@@ -4,9 +4,12 @@ import (
 	"flag"
 	"github.com/gorilla/websocket"
 	"log"
+	"math/rand"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -29,30 +32,41 @@ func main() {
 		defer c.Close()
 		defer close(done)
 		for {
-			_, message, err := c.ReadMessage()
+			_, msg, err := c.ReadMessage()
 			if err != nil {
 				log.Println("read:", err)
 				return
 			}
-			log.Printf("recv: %s", message)
+			log.Printf("recv: %s", msg)
 		}
 	}()
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	otherticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	gamestarterr := c.WriteMessage(websocket.TextMessage, []byte("start"))
-	if gamestarterr != nil {
-		log.Println("write:", err)
-		return
+	for i := 0; i < 3; i++ {
+		gamestarterr := c.WriteMessage(websocket.TextMessage, []byte("start"))
+		if gamestarterr != nil {
+			log.Println("write:", err)
+			return
+		}
+
 	}
 
 	for {
 		select {
-		case <-ticker.C:
-			err := c.WriteMessage(websocket.TextMessage, []byte("2 10"))
-			if err != nil {
+		case <-otherticker.C:
+			gamestarterr := c.WriteMessage(websocket.TextMessage, []byte("start"))
+			log.Println("start")
+			if gamestarterr != nil {
 				log.Println("write:", err)
+				return
+			}
+		case <-ticker.C:
+			err := c.WriteMessage(websocket.TextMessage, []byte(strings.Join([]string{strconv.Itoa(1 + rand.Intn(3)), " ", strconv.Itoa(10 - rand.Intn(3))}, "")))
+			if err != nil {
+				//log.Println("write:", err)
 				return
 			}
 		case <-interrupt:
